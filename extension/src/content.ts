@@ -9,12 +9,10 @@ function debounce(func: Function, wait: number) {
     };
 }
 
-
-
 // DOM PARSER
 function extractBoard() {
 
-    const board: (string | null)[][] = Array[8].fill(null).map(() => Array[8].fill(null))
+    const board: (string | null)[][] = Array(8).fill(null).map(() => Array(8).fill(null))
     const pieces = document.querySelectorAll('.piece')
 
     pieces.forEach((piece) => {
@@ -43,50 +41,67 @@ function extractBoard() {
 
 
 function generateFEN(board: (string | null)[][]) {
-    let fen = '';
+    const game = new Chess();
+    game.clear();
+
     for (let r = 0; r < 8; r++) {
-        let emptyCount = 0;
         for (let f = 0; f < 8; f++) {
             const piece = board[r][f];
             if (piece) {
-                if (emptyCount > 0) {
-                    fen += emptyCount;
-                    emptyCount = 0;
-                }
-                fen += piece;
-            } else {
-                emptyCount++;
+                const square = String.fromCharCode(97 + f) + (8 - r);
+                game.put({ type: piece.toLowerCase() as any, color: piece === piece.toUpperCase() ? 'w' : 'b' }, square);
             }
         }
-        if (emptyCount > 0) {
-            fen += emptyCount;
-        }
-        if (r < 7) fen += '/';
     }
-    const sideToMove = 'w';
-    const completeFEN = `${fen} ${sideToMove} KQkq - 0 1`;
 
-    console.log('Current FEN:', completeFEN);
-    return completeFEN;
+    const turn = getSideToMove();
+    const fen = game.fen().replace(/ [wb] /, ` ${turn} `);
+
+    console.log('Valid FEN:', fen);
+    return fen;
 }
 
 
 const handleBoardMutation = debounce(() => {
     console.log('board change')
+    const newFen = extractBoard()
+    console.log('New FEN:', newFen)
 }, 100)
 
 const observer = new MutationObserver(handleBoardMutation)
 
+
+function getSideToMove(): 'w' | 'b' {
+    const whiteTimer = document.querySelector('.clock-white.clock-player-turn');
+    if (whiteTimer) return 'w';
+
+    const blackTimer = document.querySelector('.clock-black.clock-player-turn');
+    if (blackTimer) return 'b';
+
+    return 'w';
+}
+
+let currentBoardElement: Element | null = null;
+
 function init() {
-    const boardElement = document.querySelector('wc-chess-board') || document.querySelector('#board-singe')
-    if (boardElement) {
-        console.log("board detected")
-        observer.observe(boardElement, { childList: true, subtree: true, attributes: true })
+    const boardElement = document.querySelector('wc-chess-board') || document.querySelector('#board-single') || document.querySelector('.board')
+
+    // Check if we found a board AND it's a new board (or the old one was removed from the DOM)
+    if (boardElement && (boardElement !== currentBoardElement || !document.body.contains(currentBoardElement))) {
+        console.log("New board detected, attaching observer...")
+        observer.disconnect() // Disconnect from the old board just in case
+        currentBoardElement = boardElement
+
+        // attributeFilter: ['class'] is crucial so that smooth piece animations (which change 'style')
+        // don't trigger the observer hundreds of times and starve your debounce function!
+        observer.observe(currentBoardElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
+
+        // Extract initial board state
         extractBoard()
     }
-    else {
-        setTimeout(init, 1000)
-    }
+
+    // We must CONSTANTLY poll because chess.com deletes and recreates the board element frequently!
+    setTimeout(init, 1000)
 }
 
 init()
