@@ -10,8 +10,14 @@
         "activeTab",
         "scripting"
     ],
+    "background": {
+        "service_worker": "src/background.ts",
+        "type": "module"
+    },
     "host_permissions": [
-        "*://*.chess.com/*"
+        "*://*.chess.com/*",
+        "https://explorer.lichess.ovh/*",
+        "https://generativelanguage.googleapis.com/*"
     ],
     "content_scripts": [
         {

@@ -3,7 +3,7 @@ import { Chess } from 'chess.js';
 
 function debounce(func: Function, wait: number) {
     let timeout: ReturnType<typeof setTimeout>;
-    return (...args: any[]) => {
+    return function (this: any, ...args: any[]) {
         clearTimeout(timeout);
         timeout = setTimeout(() => func.apply(this, args), wait);
     };
@@ -40,6 +40,8 @@ function extractBoard() {
 }
 
 
+let lastFen = "";
+
 function generateFEN(board: (string | null)[][]) {
     const game = new Chess();
     game.clear();
@@ -49,7 +51,7 @@ function generateFEN(board: (string | null)[][]) {
             const piece = board[r][f];
             if (piece) {
                 const square = String.fromCharCode(97 + f) + (8 - r);
-                game.put({ type: piece.toLowerCase() as any, color: piece === piece.toUpperCase() ? 'w' : 'b' }, square);
+                game.put({ type: piece.toLowerCase() as any, color: piece === piece.toUpperCase() ? 'w' : 'b' }, square as any);
             }
         }
     }
@@ -57,15 +59,36 @@ function generateFEN(board: (string | null)[][]) {
     const turn = getSideToMove();
     const fen = game.fen().replace(/ [wb] /, ` ${turn} `);
 
+    lastFen = fen;
     console.log('Valid FEN:', fen);
     return fen;
 }
 
 
+let lastRequestedFen = "";
+
 const handleBoardMutation = debounce(() => {
-    console.log('board change')
     const newFen = extractBoard()
-    console.log('New FEN:', newFen)
+    if (newFen === lastRequestedFen) return;
+
+    console.log('board change, New FEN:', newFen)
+    lastRequestedFen = newFen;
+
+    chrome.runtime.sendMessage({
+        type: 'GET_MOVE',
+        fen: newFen
+    }, (response) => {
+        console.log("Background API Response:", response);
+        if (response?.move) {
+            console.log("Engine Move:", response.move);
+            console.log("Reasoning:", response.reasoning);
+            highlightMove(response.move)
+            showReasoning(response.reasoning)
+        } else if (response?.reasoning) {
+            showReasoning(response.reasoning);
+        }
+    })
+
 }, 100)
 
 const observer = new MutationObserver(handleBoardMutation)
@@ -105,3 +128,66 @@ function init() {
 }
 
 init()
+
+function highlightMove(moveSan: string) {
+    if (!lastFen) return;
+    const game = new Chess(lastFen);
+    let moveObj;
+    try {
+        moveObj = game.move(moveSan);
+    } catch (e) {
+        console.error("Invalid move returned by API:", moveSan);
+        return;
+    }
+
+    if (!moveObj) return;
+
+    // Remove old highlights
+    document.querySelectorAll('.bot-highlight').forEach(el => el.remove());
+
+    const fromSquare = algebraicToChessCom(moveObj.from);
+    const toSquare = algebraicToChessCom(moveObj.to);
+
+    if (currentBoardElement) {
+        currentBoardElement.appendChild(createHighlight(fromSquare, "rgba(255, 0, 0, 0.5)"));
+        currentBoardElement.appendChild(createHighlight(toSquare, "rgba(255, 0, 0, 0.5)"));
+    }
+}
+
+function algebraicToChessCom(square: string) {
+    const file = square.charCodeAt(0) - 96; // 'a' is 97 -> 1
+    const rank = square.charAt(1);
+    return `${file}${rank}`;
+}
+
+function createHighlight(squareCoords: string, color: string) {
+    const div = document.createElement('div');
+    div.className = `highlight square-${squareCoords} bot-highlight`;
+    div.style.backgroundColor = color;
+    div.style.opacity = "0.6";
+    div.style.pointerEvents = "none";
+    return div;
+}
+
+function showReasoning(reasoning: string) {
+    let reasoningEl = document.getElementById("bot-reasoning");
+    if (!reasoningEl) {
+        reasoningEl = document.createElement("div");
+        reasoningEl.id = "bot-reasoning";
+        reasoningEl.style.position = "fixed";
+        reasoningEl.style.bottom = "20px";
+        reasoningEl.style.right = "20px";
+        reasoningEl.style.backgroundColor = "#2a2a2a";
+        reasoningEl.style.color = "#ffffff";
+        reasoningEl.style.padding = "15px";
+        reasoningEl.style.borderRadius = "8px";
+        reasoningEl.style.maxWidth = "300px";
+        reasoningEl.style.boxShadow = "0 4px 6px rgba(0,0,0,0.3)";
+        reasoningEl.style.zIndex = "999999";
+        reasoningEl.style.fontFamily = "sans-serif";
+        reasoningEl.style.fontSize = "14px";
+        reasoningEl.style.borderLeft = "4px solid #4CAF50";
+        document.body.appendChild(reasoningEl);
+    }
+    reasoningEl.textContent = reasoning;
+}
