@@ -40,3 +40,18 @@ changeKeyBtn.addEventListener("click", () => {
     configuredView.classList.add("hidden");
     setupView.classList.remove("hidden");
 });
+
+document.getElementById("popup-suggest-btn")?.addEventListener("click", () => {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        if (tabs[0] && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, { type: "REQUEST_MOVE_FROM_POPUP" });
+        }
+    });
+});
+document.getElementById("popup-analyze-btn")?.addEventListener("click", () => {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        if (tabs[0] && tabs[0].id) {
+            chrome.tabs.sendMessage(tabs[0].id, { type: "ANALYZE_GAME_FROM_POPUP" });
+        }
+    });
+});

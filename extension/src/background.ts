@@ -1,22 +1,103 @@
+import { buildAnalysisPrompt, buildPrompt } from "./promptBuilder";
 
-
-
-
+const model = "qwen/qwen3-coder:free"
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request.type === 'GET_MOVE') {
         handleGetMove(request.fen).then(sendResponse)
         return true // Keep the messaging channel open for the async response
     }
+    else if (request.type === 'ANALYZE_GAME') {
+        handleAnalyzeGame(request.pgn, _sender).then(sendResponse);
+        return true;
+    }
 });
+
+async function handleAnalyzeGame(pgn: string, sender: chrome.runtime.MessageSender) {
+    try {
+        await setupOffscreenDocument('offscreen.html');
+        const evals = await chrome.runtime.sendMessage({
+            type: 'OFFSCREEN_EVALUATE_GAME',
+            pgn: pgn
+        });
+
+        if (evals && evals.error) {
+            return { error: evals.error };
+        }
+
+        if (sender.tab?.id) {
+            chrome.tabs.sendMessage(sender.tab.id, { type: 'UPDATE_STATUS', status: "Stockfish evaluation complete. AI is writing the report..." }).catch(() => { });
+        }
+
+        // 2. Build the LLM prompt
+        const prompt = buildAnalysisPrompt(pgn, evals);
+
+        // 3. Fetch API Key
+        const storage = await chrome.storage.sync.get(["openRouterKey", "geminiKey"]);
+        const apiKey = storage.openRouterKey || storage.geminiKey;
+
+        if (!apiKey) {
+            return { error: "API key is missing. Please configure it in the popup." };
+        }
+
+        const data = await makeOpenRouterRequest(apiKey as string, prompt, model)
+        if (data.error) {
+            return { error: data.error.message || JSON.stringify(data.error) };
+        }
+
+        const text = data.choices?.[0]?.message?.content ?? ""
+
+        let parsed = null;
+        try {
+            const start = text.indexOf('{');
+            const end = text.lastIndexOf('}');
+            if (start !== -1 && end !== -1) {
+                parsed = JSON.parse(text.substring(start, end + 1));
+            } else {
+                parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+            }
+        } catch (e) {
+            console.error("Failed to parse JSON. Raw text:", text);
+            return { error: "Failed to parse analysis from AI." };
+        }
+
+        // Send the parsed report back to the content script!
+        return { report: parsed };
+    } catch (e: any) {
+        console.error("Error analyzing game:", e)
+        return { error: e.message || "An unknown error occured during analysis" }
+    }
+}
 
 async function handleGetMove(fen: string) {
     const lichessData = await fetchLichessMoves(fen);
 
     const prompt = buildPrompt(fen, lichessData);
 
-    const move = await callOpenRouter(prompt);
-    return move;
+    const storage = await chrome.storage.sync.get(["openRouterKey", "geminiKey"]);
+    const apiKey = storage.openRouterKey || storage.geminiKey;
+    if (!apiKey) return { move: null, reasoning: "API key is missing" };
+
+    const data = await makeOpenRouterRequest(apiKey as string, prompt, model);
+
+    if (data.error) {
+        return { error: data.error.message || JSON.stringify(data.error) };
+    }
+
+    try {
+        const text = data.choices?.[0]?.message?.content ?? "";
+        let parsed = null;
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start !== -1 && end !== -1) {
+            parsed = JSON.parse(text.substring(start, end + 1));
+        } else {
+            parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+        }
+        return parsed;
+    } catch (e) {
+        return { move: null, reasoning: "API key is missing" };
+    }
 }
 
 async function fetchLichessMoves(fen: string) {
@@ -40,57 +121,27 @@ async function fetchLichessMoves(fen: string) {
     }
 }
 
-
-function buildPrompt(fen: string, lichessMoves: any[] | null) {
-    let context = "";
-
-    if (lichessMoves && lichessMoves.length > 0) {
-        const moveLines = lichessMoves.map(m => {
-            const total = m.total;
-            const winRate = total > 0 ? Math.round((m.white / total) * 100) : 0;
-            return `  ${m.move}: played ${total.toLocaleString()} times, white wins ${winRate}%`;
-        }).join("\n");
-
-        context = `\nLichess database (1500-2000 Elo) shows these moves played in this position:\n${moveLines}\n`;
-    }
-
-    return `You are a chess engine. Analyze the position and return the best move.
-
-FEN: ${fen}
-${context}
-Respond ONLY with this JSON, no other text:
-{
-  "move": "<move in SAN notation e.g. Nf3>",
-  "reasoning": "<one sentence explanation>"
-}`;
-}
-
 async function callOpenRouter(prompt: string) {
     const storage = await chrome.storage.sync.get(["openRouterKey", "geminiKey"]);
-    const apiKey = (storage.openRouterKey || storage.geminiKey) as string;
-    console.log("API key", apiKey)
+    const apiKey = storage.openRouterKey || storage.geminiKey;
+
     if (!apiKey) {
-        return { move: null, reasoning: "API key is missing" };
+        return { move: null, reasoning: "API key is missing. Please configure it in the popup." };
     }
 
     try {
-        let data = await makeOpenRouterRequest(apiKey, prompt, "meta-llama/llama-3.3-70b-instruct:free");
-
-        // If the primary free provider is down, fallback to another highly capable free model
-        if (data.error && data.error.message.includes("Provider returned error")) {
-            console.warn("Llama 3.3 free provider is down, falling back to Gemma 4 31B...");
-            data = await makeOpenRouterRequest(apiKey, prompt, "google/gemma-4-31b-it:free");
-        }
+        const data = await makeOpenRouterRequest(apiKey as string, prompt, model)
 
         if (data.error) {
-            console.error("OpenRouter API Error:", data.error);
-            return { move: null, reasoning: `API Error: ${data.error.message}` };
+            return { move: null, reasoning: data.error.message || JSON.stringify(data.error) };
         }
 
-        const text = data.choices?.[0]?.message?.content ?? "";
+        const text = data.choices?.[0]?.message?.content ?? ""
 
+        // Try to parse JSON from the response. Sometimes the model wraps it in markdown like ```json ... ```
         let parsed = null;
         try {
+            // Very naive way to extract json if it includes other text
             const start = text.indexOf('{');
             const end = text.lastIndexOf('}');
             if (start !== -1 && end !== -1) {
@@ -99,14 +150,15 @@ async function callOpenRouter(prompt: string) {
                 parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
             }
         } catch (e) {
-            console.error("Failed to parse JSON. Raw text:", text);
-            return { move: null, reasoning: `AI returned invalid format: ${text.substring(0, 50)}...` };
+            console.error("Failed to parse JSON from OpenRouter. Raw text:", text);
+            return { move: null, reasoning: text }; // Fallback to raw text
         }
 
         return parsed;
-    } catch (e) {
-        console.error("OpenRouter Error:", e);
-        return { move: null, reasoning: "Parse error or Network error" };
+
+    } catch (error: any) {
+        console.error("Error calling OpenRouter:", error);
+        return { move: null, reasoning: "API request failed: " + error.message };
     }
 }
 
@@ -130,4 +182,29 @@ async function makeOpenRouterRequest(apiKey: string, prompt: string, model: stri
         })
     });
     return await res.json();
+}
+
+let creating: Promise<void> | null = null;
+async function setupOffscreenDocument(path: string) {
+    const offscreenUrl = chrome.runtime.getURL(path);
+    const existingContexts = await chrome.runtime.getContexts({
+        contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT || "OFFSCREEN_DOCUMENT"],
+        documentUrls: [offscreenUrl]
+    });
+
+    if (existingContexts.length > 0) {
+        return;
+    }
+
+    if (creating) {
+        await creating;
+    } else {
+        creating = chrome.offscreen.createDocument({
+            url: path,
+            reasons: [chrome.offscreen.Reason.WORKERS || "WORKERS"] as any,
+            justification: "Run Stockfish Engine",
+        });
+        await creating;
+        creating = null;
+    }
 }

@@ -19,4 +19,11 @@ export default defineConfig({
     legacy: {
         skipWebSocketTokenCheck: true,
     },
+    build: {
+        rollupOptions: {
+            input: {
+                offscreen: 'offscreen.html'
+            }
+        }
+    }
 });

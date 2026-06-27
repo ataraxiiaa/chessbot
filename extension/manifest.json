@@ -5,10 +5,12 @@
     "action": {
         "default_popup": "index.html"
     },
+    "options_page": "offscreen.html",
     "permissions": [
         "storage",
         "activeTab",
-        "scripting"
+        "scripting",
+        "offscreen"
     ],
     "background": {
         "service_worker": "src/background.ts",
@@ -27,6 +29,12 @@
             "js": [
                 "src/content.ts"
             ]
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": ["offscreen.html", "stockfish.js", "stockfish.wasm"],
+            "matches": ["<all_urls>"]
         }
     ]
 }
